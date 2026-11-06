@@ -7,7 +7,7 @@ const fmt = (n) => (Math.round(n * 100) / 100).toLocaleString("pt-BR", { maximum
 const agora = () => new Date().toISOString();
 const dataCurta = (iso) => (iso ? new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "");
 
-const S = { turmas: {}, avaliacoes: {}, resultados: {}, timbrados: {}, pastas: {}, perfil: {} };
+const S = { turmas: {}, avaliacoes: {}, resultados: {}, timbrados: {}, pastas: {}, perfil: {}, acessos: {} };
 const ui = { aba: "turmas", avSel: null, pasta: "", turmaFiltro: "", leituras: [], carregando: true, camera: null };
 const ABAS = [
   ["turmas", "Turmas"],
@@ -17,6 +17,12 @@ const ABAS = [
   ["notas", "Notas"],
   ["escola", "Escola"],
 ];
+/* A aba Acessos só existe para o administrador */
+const abasVisiveis = () => (ui.admin ? [...ABAS, ["acessos", "Acessos"]] : ABAS);
+
+/* ===================== Controle de acesso ===================== */
+/* E-mails dos administradores (js/config.js). Sem nenhum configurado, o site não pede aprovação. */
+const emailsAdmin = () => [].concat(window.GABARITO_ADMIN || []).map((e) => String(e).trim().toLowerCase()).filter(Boolean);
 
 /* ===================== Armazenamento ===================== */
 const KINDS = ["turmas", "avaliacoes", "resultados", "timbrados", "pastas"];
@@ -28,6 +34,7 @@ const Nuvem = {
   db: null,
   auth: null,
   subs: [],
+  subsAcesso: [],
   tokenSheets: null,
 
   async iniciar() {
@@ -47,32 +54,84 @@ const Nuvem = {
     this.auth.getRedirectResult().catch((e) => toast(msgErroLogin(e)));
     this.auth.onAuthStateChanged((u) => {
       this.usuario = u;
-      ui.semAcesso = false;
-      this.subs.forEach((f) => f()); this.subs = [];
-      KINDS.forEach((k) => (S[k] = {})); S.perfil = {};
+      ui.semAcesso = false; ui.acesso = null; ui.admin = false; ui.acessosBloqueados = false;
+      this.pararDados();
+      this.subsAcesso.forEach((f) => f()); this.subsAcesso = [];
+      S.acessos = {};
       if (!u) { ui.carregando = false; render(); return; }
       ui.carregando = true; render();
-      let pendentes = KINDS.length + 1;
-      const pronto = () => { if (--pendentes === 0) { ui.carregando = false; } render(); };
-      for (const k of KINDS) {
-        let primeira = true;
-        this.subs.push(this.db.collection(COL(k)).where("dono", "==", u.uid).onSnapshot((snap) => {
-          const m = {};
-          snap.forEach((d) => (m[d.id] = { ...d.data(), id: d.id }));
-          S[k] = m;
-          if (primeira) { primeira = false; pronto(); } else render();
-        }, (e) => {
-          // regras antigas sem gab_timbrados/gab_pastas: o resto do site continua funcionando
-          if ((k === "timbrados" || k === "pastas") && e && e.code === "permission-denied") ui.timbradosBloqueados = true; else erroSync(e);
-          if (primeira) { primeira = false; pronto(); }
-        }));
+      const admins = emailsAdmin();
+      if (!admins.length) { ui.acesso = "aprovado"; this.carregarDados(u); return; }
+      if (u.email && admins.includes(u.email.toLowerCase())) {
+        ui.admin = true; ui.acesso = "aprovado";
+        this.carregarDados(u);
+        this.ouvirAcessos();
+        return;
       }
-      let primeiraP = true;
-      this.subs.push(this.db.collection(COL("perfis")).doc(u.uid).onSnapshot((d) => {
-        S.perfil = d.exists ? d.data() : {};
-        if (primeiraP) { primeiraP = false; pronto(); } else render();
-      }, () => { if (primeiraP) { primeiraP = false; pronto(); } }));
+      // Professor: só usa o site depois que o administrador aprovar (gab_acessos/{uid}.status == "aprovado")
+      let pedindo = false;
+      this.subsAcesso.push(this.db.collection(COL("acessos")).doc(u.uid).onSnapshot((d) => {
+        if (!d.exists) {
+          if (d.metadata.fromCache) return; // espera a resposta do servidor antes de criar o pedido
+          ui.acesso = "pendente"; ui.carregando = false; render();
+          if (!pedindo) {
+            pedindo = true;
+            this.db.collection(COL("acessos")).doc(u.uid).set({
+              uid: u.uid, dono: u.uid, nome: u.displayName || "", email: u.email || "", foto: u.photoURL || "",
+              status: "pendente", pedidoEm: agora(),
+            }).catch((e) => toast("Não consegui enviar o pedido de acesso: " + e.message));
+          }
+          return;
+        }
+        const st = d.data().status || "pendente";
+        ui.acesso = st;
+        if (st === "aprovado") { if (!this.subs.length) this.carregarDados(u); else render(); }
+        else { this.pararDados(); ui.carregando = false; render(); }
+      }, (e) => { ui.acesso = "erro"; ui.erroAcesso = (e && e.message) || String(e); ui.carregando = false; render(); }));
     });
+  },
+
+  /* Turmas, avaliações, notas… do professor logado */
+  carregarDados(u) {
+    ui.carregando = true; render();
+    let pendentes = KINDS.length + 1;
+    const pronto = () => { if (--pendentes === 0) { ui.carregando = false; } render(); };
+    for (const k of KINDS) {
+      let primeira = true;
+      this.subs.push(this.db.collection(COL(k)).where("dono", "==", u.uid).onSnapshot((snap) => {
+        const m = {};
+        snap.forEach((d) => (m[d.id] = { ...d.data(), id: d.id }));
+        S[k] = m;
+        if (primeira) { primeira = false; pronto(); } else render();
+      }, (e) => {
+        // regras antigas sem gab_timbrados/gab_pastas: o resto do site continua funcionando
+        if ((k === "timbrados" || k === "pastas") && e && e.code === "permission-denied") ui.timbradosBloqueados = true; else erroSync(e);
+        if (primeira) { primeira = false; pronto(); }
+      }));
+    }
+    let primeiraP = true;
+    this.subs.push(this.db.collection(COL("perfis")).doc(u.uid).onSnapshot((d) => {
+      S.perfil = d.exists ? d.data() : {};
+      if (primeiraP) { primeiraP = false; pronto(); } else render();
+    }, () => { if (primeiraP) { primeiraP = false; pronto(); } }));
+  },
+  pararDados() {
+    this.subs.forEach((f) => f()); this.subs = [];
+    KINDS.forEach((k) => (S[k] = {})); S.perfil = {};
+  },
+
+  /* Administrador: todos os pedidos de acesso */
+  ouvirAcessos() {
+    this.subsAcesso.push(this.db.collection(COL("acessos")).onSnapshot((snap) => {
+      const m = {};
+      snap.forEach((d) => (m[d.id] = { ...d.data(), uid: d.id }));
+      S.acessos = m; ui.acessosBloqueados = false;
+      render();
+    }, (e) => { if (e && e.code === "permission-denied") { ui.acessosBloqueados = true; render(); } else erroSync(e); }));
+  },
+  mudarAcesso(uid, status) {
+    return this.db.collection(COL("acessos")).doc(uid).update({ status, decididoEm: agora() }).then(() => true)
+      .catch((e) => toast(e && e.code === "permission-denied" ? "O Firebase recusou. Publique as regras novas (regras-firebase-gabarito.txt) e tente de novo." : "Não foi possível alterar: " + e.message) && false);
   },
 
   iniciarLocal() {
@@ -266,16 +325,18 @@ function render() {
   const nuvem = Nuvem.modo === "nuvem";
   $("#faixaLocal").hidden = nuvem || ui.carregando;
   // topo
-  const logado = !nuvem || Nuvem.usuario;
-  $("#etapas").innerHTML = logado ? ABAS.map(([id, nome], i) => `<button class="etapa" data-aba="${id}" ${ui.aba === id ? 'aria-current="page"' : ""}>${i < 5 ? `<b>${i + 1}</b>` : ""}${nome}</button>`).join("") : "";
+  const logado = !nuvem || (Nuvem.usuario && ui.acesso === "aprovado");
+  const nPend = ui.admin ? Object.values(S.acessos).filter((a) => a.status === "pendente").length : 0;
+  $("#etapas").innerHTML = logado ? abasVisiveis().map(([id, nome], i) => `<button class="etapa" data-aba="${id}" ${ui.aba === id ? 'aria-current="page"' : ""}>${i < 5 ? `<b>${i + 1}</b>` : ""}${nome}${id === "acessos" && nPend ? ` <span class="chip warn" title="Pedidos aguardando">${nPend}</span>` : ""}</button>`).join("") : "";
   const u = Nuvem.usuario;
-  $("#conta").innerHTML = nuvem && u ? `<button class="avatar" data-aba="escola" title="${esc(u.email)}">${u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : esc((u.displayName || u.email || "?")[0])}</button>` : "";
+  $("#conta").innerHTML = nuvem && u ? `<button class="avatar" ${logado ? 'data-aba="escola"' : 'data-acao="sair"'} title="${esc(u.email)}">${u.photoURL ? `<img src="${esc(u.photoURL)}" alt="">` : esc((u.displayName || u.email || "?")[0])}</button>` : "";
 
   const m = $("#main");
   if (ui.carregando) { m.innerHTML = `<div class="vazio"><strong>Carregando seus dados…</strong></div>`; return; }
   if (nuvem && !u) { m.innerHTML = telaEntrar(); return; }
+  if (nuvem && ui.acesso !== "aprovado") { m.innerHTML = telaAguardando(u); return; }
   if (nuvem && ui.semAcesso) { m.innerHTML = `<div class="entrar"><div class="bloco"><h2>Conta ainda não liberada</h2><p class="muted" style="margin:0">Você entrou como <strong>${esc(u.email)}</strong>, mas este e-mail ainda não está na lista de professores liberados. Peça ao administrador para incluir seu e-mail e depois recarregue a página.</p><button class="btn" data-acao="sair">Sair</button></div></div>`; return; }
-  const telas = { turmas: telaTurmas, avaliacoes: telaAvaliacoes, folhas: telaFolhas, corrigir: telaCorrigir, notas: telaNotas, escola: telaEscola };
+  const telas = { turmas: telaTurmas, avaliacoes: telaAvaliacoes, folhas: telaFolhas, corrigir: telaCorrigir, notas: telaNotas, escola: telaEscola, acessos: ui.admin ? telaAcessos : telaTurmas };
   m.innerHTML = (telas[ui.aba] || telaTurmas)();
   if (ui.aba === "folhas") desenharPrevia();
   const atual = $(".etapa[aria-current=page]");
@@ -291,6 +352,38 @@ function telaEntrar() {
     <button class="btn pri" data-acao="entrar">Entrar com Google</button>
     <small class="muted">Cada professor vê apenas as próprias turmas, avaliações e notas.</small>
   </div></div>`;
+}
+
+/* Professor que ainda não foi aprovado (ou teve o acesso recusado/removido) */
+function telaAguardando(u) {
+  const st = ui.acesso;
+  const quem = `<p class="muted" style="margin:0">Você entrou como <strong>${esc(u.email)}</strong>.</p>`;
+  let corpo;
+  if (st === "recusado" || st === "removido") corpo = `<h2>Acesso não liberado</h2>${quem}<p style="margin:0">O administrador não liberou o acesso a este site para a sua conta. Se achar que é um engano, fale com ele.</p>`;
+  else if (st === "erro") corpo = `<h2>Não consegui verificar seu acesso</h2>${quem}<p class="muted" style="margin:0">${esc(ui.erroAcesso || "")}</p><button class="btn" data-acao="recarregar">Tentar de novo</button>`;
+  else corpo = `<h2>Pedido enviado</h2><p style="margin:0">Seu pedido de acesso foi enviado. Aguarde a aprovação do administrador.</p>${quem}<small class="muted">Pode deixar esta página aberta: ela se abre sozinha assim que o acesso for liberado.</small>`;
+  return `<div class="entrar"><div class="bloco">${corpo}<button class="btn" data-acao="sair">Sair</button></div></div>`;
+}
+
+/* ---------- Acessos (só o administrador) ---------- */
+function telaAcessos() {
+  const todos = Object.values(S.acessos).filter((a) => a.uid !== (Nuvem.usuario && Nuvem.usuario.uid));
+  const por = (f, campo) => todos.filter(f).sort((a, b) => String(b[campo] || "").localeCompare(String(a[campo] || "")));
+  const pend = por((a) => a.status === "pendente", "pedidoEm");
+  const aprov = por((a) => a.status === "aprovado", "decididoEm");
+  const fora = por((a) => a.status === "recusado" || a.status === "removido", "decididoEm");
+  const pessoa = (a, botoes, extra = "") => `<div class="cartao acesso">
+      <div class="acesso-quem"><span class="avatar" aria-hidden="true">${a.foto ? `<img src="${esc(a.foto)}" alt="" referrerpolicy="no-referrer">` : esc((a.nome || a.email || "?")[0].toUpperCase())}</span>
+        <div><h3>${esc(a.nome || "Sem nome")}</h3><small class="muted">${esc(a.email)}</small></div></div>
+      <div class="meta">${extra}<span class="chip">Pediu em ${esc(dataCurta(a.pedidoEm))}</span></div>
+      <div class="acoes">${botoes}</div></div>`;
+  const bloco = (titulo, xs, vazio, fn) => `<h3 class="titulo-acessos">${titulo} <span class="muted">(${xs.length})</span></h3>
+    ${xs.length ? `<div class="lista">${xs.map(fn).join("")}</div>` : `<p class="muted">${vazio}</p>`}`;
+  return `<div class="cab"><div><h2>Acessos</h2><p>Quem entra com a conta Google pela primeira vez fica aguardando aqui e não vê nada até você aprovar. Remover o acesso não apaga as turmas e notas da pessoa: se você aprovar de novo, ela volta com tudo.</p></div></div>
+    ${ui.acessosBloqueados ? `<div class="aviso erro">O Firebase ainda não deixa ver os pedidos. Publique as regras novas (arquivo regras-firebase-gabarito.txt) no console do Firebase e recarregue a página.</div>` : ""}
+    ${bloco("Aguardando", pend, "Nenhum pedido novo.", (a) => pessoa(a, `<button class="btn pri peq" data-acao="acesso" data-uid="${esc(a.uid)}" data-status="aprovado">Aprovar</button><button class="btn perigo peq" data-acao="acesso" data-uid="${esc(a.uid)}" data-status="recusado">Recusar</button>`))}
+    ${bloco("Com acesso", aprov, "Ninguém aprovado ainda.", (a) => pessoa(a, `<button class="btn perigo peq" data-acao="acesso" data-uid="${esc(a.uid)}" data-status="removido" data-armar="1">Remover acesso</button>`, `<span class="chip ok">Com acesso</span>`))}
+    ${bloco("Recusados ou removidos", fora, "Ninguém por aqui.", (a) => pessoa(a, `<button class="btn peq" data-acao="acesso" data-uid="${esc(a.uid)}" data-status="aprovado">Aprovar</button>`, `<span class="chip bad">${a.status === "removido" ? "Removido" : "Recusado"}</span>`))}`;
 }
 
 /* ---------- Turmas ---------- */
@@ -1469,6 +1562,11 @@ function carregarExemplo() {
 const acoes = {
   entrar: () => Nuvem.entrar(),
   sair: () => Nuvem.sair(),
+  recarregar: () => location.reload(),
+  acesso: (el) => {
+    const faz = () => { const n = S.acessos[el.dataset.uid]; Nuvem.mudarAcesso(el.dataset.uid, el.dataset.status).then((ok) => ok && n && toast(`${n.nome || n.email}: ${({ aprovado: "acesso liberado", recusado: "pedido recusado", removido: "acesso removido" })[el.dataset.status]}.`)); };
+    if (el.dataset.armar) armar(el, faz); else faz();
+  },
   fechar: fecharPainel,
   "importar-atas": () => $("#arqAtas").click(),
   "nova-turma": () => painelTurma(null),
@@ -1732,8 +1830,8 @@ $("#arqLogo").addEventListener("change", (e) => {
   };
   im.src = url;
 });
-window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (ABAS.some(([id]) => id === h) && h !== ui.aba) { ui.aba = h; render(); } });
+window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (abasVisiveis().some(([id]) => id === h) && h !== ui.aba) { ui.aba = h; render(); } });
 
-{ const h = location.hash.slice(1); if (ABAS.some(([id]) => id === h)) ui.aba = h; }
+{ const h = location.hash.slice(1); if (ABAS.some(([id]) => id === h) || h === "acessos") ui.aba = h; }
 render();
 Nuvem.iniciar();
