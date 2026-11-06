@@ -351,7 +351,7 @@ function telaAvaliacoes() {
     const lidas = resultadosDe(av.id).length;
     const tipos = [...new Set(av.secoes.map((s) => (s.tipo === "C" ? "C/E" : "A–" + LETRAS[+s.tipo - 1])))].join(", ");
     const total = corrigir(av, "", "A").total;
-    return `<button class="cartao clicavel" data-acao="editar-av" data-id="${av.id}">
+    return `<div class="cartao-av"><button class="cartao clicavel" data-acao="editar-av" data-id="${av.id}">
         <h3>${esc(av.titulo || "Sem título")}</h3>
         <small class="muted">${esc(av.componente || "")}</small>
         <div class="meta"><span class="chip ${av.tipo === "neutra" ? "" : "acc"}">${av.tipo === "neutra" ? "Folha neutra" : "Folha nominal"}</span>
@@ -362,7 +362,7 @@ function telaAvaliacoes() {
           <span class="chip ${gabOk ? "ok" : "warn"}">${gabOk ? "Gabarito completo" : "Gabarito incompleto"}</span>
           ${lidas ? `<span class="chip ok">${lidas} lida${lidas > 1 ? "s" : ""}</span>` : ""}</div>
         <small class="muted">${esc((av.turmas || []).map((id) => S.turmas[id] && S.turmas[id].nome).filter(Boolean).join(" · ") || "Nenhuma turma selecionada")}</small>
-      </button>`;
+      </button><button type="button" class="btn peq mover-av" data-acao="mover-av" data-id="${av.id}" title="Mover para outra pasta">Mover</button></div>`;
   };
   const vazio = !todas.length && !pastas.length
     ? `<div class="vazio"><strong>Nenhuma avaliação ainda</strong>Crie a primeira: título, componente, número de questões, alternativas e gabarito. Se quiser, crie antes pastas para separar por escola ou unidade.<button class="btn pri" data-acao="nova-av">Nova avaliação</button></div>`
@@ -384,6 +384,20 @@ function painelPasta(p) {
     </div>
     <div class="painel-rodape"><button class="btn" data-acao="fechar">Cancelar</button><button class="btn pri" data-acao="salvar-pasta">Salvar</button></div>`, { pasta: p || { id: novoId(), paiId: ui.pasta } });
   setTimeout(() => $("#pastaNome") && $("#pastaNome").focus(), 50);
+}
+
+/* Mover uma avaliação: lista "Sem pasta" e todas as pastas, a atual marcada */
+function painelMoverAv(av) {
+  const atual = pastaDaAv(av);
+  const opcao = (id, nome, nivel) => `<button type="button" class="btn opcao-pasta" data-acao="mover-av-para" data-id="${id}" style="padding-left:${14 + nivel * 22}px" ${id === atual ? 'disabled aria-current="true"' : ""}>
+      <span class="icone-pasta" aria-hidden="true"></span><span>${esc(nome)}</span>${id === atual ? '<small class="muted">(está aqui)</small>' : ""}</button>`;
+  abrirPainel(`${cabPainel("Mover avaliação")}
+    <div class="painel-corpo">
+      <p class="muted" style="margin:0">Escolha para onde vai <strong>${esc(av.titulo || "Sem título")}</strong>:</p>
+      <div class="lista-mover">${opcao("", "Sem pasta (Avaliações)", 0)}${arvorePastas().map((p) => opcao(p.id, p.nome, p.nivel + 1)).join("")}</div>
+      ${Object.keys(S.pastas).length ? "" : '<p class="muted">Você ainda não criou pastas. Use o botão "Nova pasta" na aba Avaliações.</p>'}
+    </div>
+    <div class="painel-rodape"><button class="btn" data-acao="fechar">Cancelar</button></div>`, { avId: av.id });
 }
 
 /* ---------- Folhas ---------- */
@@ -1471,6 +1485,14 @@ const acoes = {
   "confirmar-importacao": confirmarImportacao,
   "nova-av": () => painelAvaliacao(null),
   "nova-pasta": () => painelPasta(null),
+  "mover-av": (el) => { const av = S.avaliacoes[el.dataset.id]; if (av) painelMoverAv(normAv({ ...av })); },
+  "mover-av-para": (el) => {
+    const av = painelAtual && S.avaliacoes[painelAtual.avId];
+    if (!av) { fecharPainel(); return; }
+    const destino = pastaValida(el.dataset.id);
+    Nuvem.put("avaliacoes", av.id, { ...av, pastaId: destino });
+    fecharPainel(); toast(`Avaliação movida para ${destino ? nomeCaminho(destino) : "Sem pasta"}.`);
+  },
   "abrir-pasta": (el) => { ui.pasta = el.dataset.id || ""; render(); window.scrollTo(0, 0); },
   "renomear-pasta": (el) => painelPasta(S.pastas[el.dataset.id]),
   "salvar-pasta": () => {
