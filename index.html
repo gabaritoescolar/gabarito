@@ -113,6 +113,16 @@ textarea { resize: vertical; line-height: 1.45; }
 .cartao.clicavel:hover { border-color: var(--accent); }
 .cartao h3 { overflow-wrap: anywhere; }
 .cartao .meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.migalhas { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: -4px 0 14px; font-size: .95rem; }
+.migalhas > button { background: none; border: 0; padding: 4px 2px; font: inherit; color: var(--accent); cursor: pointer; border-radius: 6px; }
+.migalhas > button[aria-current] { color: var(--ink); font-weight: 700; cursor: default; }
+.migalhas > span[aria-hidden] { color: var(--muted); }
+.migalhas-acoes { display: flex; gap: 6px; margin-left: auto; }
+.lista-pastas { margin-bottom: 12px; }
+.cartao.pasta { flex-direction: row; align-items: center; justify-content: space-between; gap: 10px; padding: 14px 16px; }
+.cartao.pasta h3 { display: flex; align-items: center; gap: 10px; margin: 0; }
+.icone-pasta { width: 22px; height: 17px; flex: none; border-radius: 3px; background: var(--accent); opacity: .85; position: relative; top: 1px; }
+.icone-pasta::before { content: ""; position: absolute; left: 0; top: -4px; width: 10px; height: 5px; border-radius: 2px 2px 0 0; background: inherit; }
 .chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 9px; border-radius: 999px; background: var(--surface-2); color: var(--muted); font-size: .82rem; font-weight: 700; white-space: nowrap; }
 .chip.ok { background: var(--ok-soft); color: var(--ok); }
 .chip.bad { background: var(--bad-soft); color: var(--bad); }

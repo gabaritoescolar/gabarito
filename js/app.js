@@ -7,8 +7,8 @@ const fmt = (n) => (Math.round(n * 100) / 100).toLocaleString("pt-BR", { maximum
 const agora = () => new Date().toISOString();
 const dataCurta = (iso) => (iso ? new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "");
 
-const S = { turmas: {}, avaliacoes: {}, resultados: {}, timbrados: {}, perfil: {} };
-const ui = { aba: "turmas", avSel: null, turmaFiltro: "", leituras: [], carregando: true, camera: null };
+const S = { turmas: {}, avaliacoes: {}, resultados: {}, timbrados: {}, pastas: {}, perfil: {} };
+const ui = { aba: "turmas", avSel: null, pasta: "", turmaFiltro: "", leituras: [], carregando: true, camera: null };
 const ABAS = [
   ["turmas", "Turmas"],
   ["avaliacoes", "Avaliações"],
@@ -19,7 +19,7 @@ const ABAS = [
 ];
 
 /* ===================== Armazenamento ===================== */
-const KINDS = ["turmas", "avaliacoes", "resultados", "timbrados"];
+const KINDS = ["turmas", "avaliacoes", "resultados", "timbrados", "pastas"];
 /* Na nuvem, as coleções ficam com o prefixo gab_ para não se misturar com outros dados do mesmo projeto Firebase */
 const COL = (k) => (window.GABARITO_PREFIXO ?? "gab_") + k;
 const Nuvem = {
@@ -62,8 +62,8 @@ const Nuvem = {
           S[k] = m;
           if (primeira) { primeira = false; pronto(); } else render();
         }, (e) => {
-          // regras antigas sem gab_timbrados: o resto do site continua funcionando
-          if (k === "timbrados" && e && e.code === "permission-denied") ui.timbradosBloqueados = true; else erroSync(e);
+          // regras antigas sem gab_timbrados/gab_pastas: o resto do site continua funcionando
+          if ((k === "timbrados" || k === "pastas") && e && e.code === "permission-denied") ui.timbradosBloqueados = true; else erroSync(e);
           if (primeira) { primeira = false; pronto(); }
         }));
       }
@@ -309,16 +309,49 @@ function telaTurmas() {
 }
 
 /* ---------- Avaliações ---------- */
+/* Pastas: { nome, paiId } ("" = raiz). Uma avaliação fica na pasta av.pastaId; sem pasta (ou pasta apagada) fica na raiz. */
+const pastaValida = (id) => (id && S.pastas[id] ? id : "");
+const pastaDaAv = (av) => pastaValida(av && av.pastaId);
+const ordenarNome = (xs) => xs.sort((a, b) => (a.nome || "").localeCompare(b.nome || "", "pt-BR", { numeric: true }));
+const subpastas = (id) => ordenarNome(Object.values(S.pastas).filter((p) => pastaValida(p.paiId) === id));
+function caminhoPasta(id) {
+  const out = [], vistos = new Set();
+  for (let p = S.pastas[pastaValida(id)]; p && !vistos.has(p.id); p = S.pastas[pastaValida(p.paiId)]) { vistos.add(p.id); out.unshift(p); }
+  return out;
+}
+const nomeCaminho = (id) => caminhoPasta(id).map((p) => p.nome).join(" › ");
+/* Pastas dentro de uma pasta (ela mesma inclusa), para contar avaliações e evitar mover uma pasta para dentro de si */
+function pastasAbaixo(id) {
+  const out = new Set([id]);
+  let mudou = true;
+  while (mudou) { mudou = false; for (const p of Object.values(S.pastas)) if (!out.has(p.id) && out.has(pastaValida(p.paiId))) { out.add(p.id); mudou = true; } }
+  return out;
+}
+/* Todas as pastas em ordem de árvore, com o nível, para listas de escolha */
+function arvorePastas(id = "", nivel = 0, out = []) {
+  for (const p of subpastas(id)) { out.push({ ...p, nivel }); arvorePastas(p.id, nivel + 1, out); }
+  return out;
+}
 function telaAvaliacoes() {
-  const avs = listaAvaliacoes();
-  return `<div class="cab"><div><h2>Avaliações</h2><p>Cadastre a prova, o gabarito e as turmas que vão fazê-la. A folha pode ser nominal (um por aluno) ou neutra (sem nome).</p></div>
-    <div class="acoes"><button class="btn pri" data-acao="nova-av">Nova avaliação</button></div></div>
-    ${avs.length ? `<div class="lista">${avs.map((av) => {
-      const gabOk = gabCompleto(av);
-      const lidas = resultadosDe(av.id).length;
-      const tipos = [...new Set(av.secoes.map((s) => (s.tipo === "C" ? "C/E" : "A–" + LETRAS[+s.tipo - 1])))].join(", ");
-      const total = corrigir(av, "", "A").total;
-      return `<button class="cartao clicavel" data-acao="editar-av" data-id="${av.id}">
+  ui.pasta = pastaValida(ui.pasta);
+  const atual = ui.pasta, todas = listaAvaliacoes();
+  const avs = todas.filter((av) => pastaDaAv(av) === atual), pastas = subpastas(atual);
+  const caminho = caminhoPasta(atual);
+  const migalhas = `<nav class="migalhas" aria-label="Pastas"><button type="button" data-acao="abrir-pasta" data-id="" ${atual ? "" : 'aria-current="page"'}>Avaliações</button>${caminho.map((p, i) => `<span aria-hidden="true">›</span><button type="button" data-acao="abrir-pasta" data-id="${p.id}" ${i === caminho.length - 1 ? 'aria-current="page"' : ""}>${esc(p.nome)}</button>`).join("")}
+    ${atual ? `<span class="migalhas-acoes"><button type="button" class="btn peq" data-acao="renomear-pasta" data-id="${atual}">Renomear pasta</button><button type="button" class="btn peq perigo" data-acao="excluir-pasta" data-id="${atual}">Excluir pasta</button></span>` : ""}</nav>`;
+  const cartaoPasta = (p) => {
+    const dentro = pastasAbaixo(p.id), nAv = todas.filter((av) => dentro.has(pastaDaAv(av))).length, nSub = subpastas(p.id).length;
+    return `<button class="cartao clicavel pasta" data-acao="abrir-pasta" data-id="${p.id}">
+      <h3><span class="icone-pasta" aria-hidden="true"></span>${esc(p.nome)}</h3>
+      <small class="muted">${nAv} avaliaç${nAv === 1 ? "ão" : "ões"}${nSub ? ` · ${nSub} pasta${nSub > 1 ? "s" : ""}` : ""}</small>
+    </button>`;
+  };
+  const cartaoAv = (av) => {
+    const gabOk = gabCompleto(av);
+    const lidas = resultadosDe(av.id).length;
+    const tipos = [...new Set(av.secoes.map((s) => (s.tipo === "C" ? "C/E" : "A–" + LETRAS[+s.tipo - 1])))].join(", ");
+    const total = corrigir(av, "", "A").total;
+    return `<button class="cartao clicavel" data-acao="editar-av" data-id="${av.id}">
         <h3>${esc(av.titulo || "Sem título")}</h3>
         <small class="muted">${esc(av.componente || "")}</small>
         <div class="meta"><span class="chip ${av.tipo === "neutra" ? "" : "acc"}">${av.tipo === "neutra" ? "Folha neutra" : "Folha nominal"}</span>
@@ -330,8 +363,27 @@ function telaAvaliacoes() {
           ${lidas ? `<span class="chip ok">${lidas} lida${lidas > 1 ? "s" : ""}</span>` : ""}</div>
         <small class="muted">${esc((av.turmas || []).map((id) => S.turmas[id] && S.turmas[id].nome).filter(Boolean).join(" · ") || "Nenhuma turma selecionada")}</small>
       </button>`;
-    }).join("")}</div>`
-    : `<div class="vazio"><strong>Nenhuma avaliação ainda</strong>Crie a primeira: título, componente, número de questões, alternativas e gabarito.<button class="btn pri" data-acao="nova-av">Nova avaliação</button></div>`}`;
+  };
+  const vazio = !todas.length && !pastas.length
+    ? `<div class="vazio"><strong>Nenhuma avaliação ainda</strong>Crie a primeira: título, componente, número de questões, alternativas e gabarito. Se quiser, crie antes pastas para separar por escola ou unidade.<button class="btn pri" data-acao="nova-av">Nova avaliação</button></div>`
+    : !avs.length && !pastas.length ? `<div class="vazio"><strong>Pasta vazia</strong>Crie uma avaliação ou uma pasta aqui dentro.<button class="btn pri" data-acao="nova-av">Nova avaliação</button></div>` : "";
+  return `<div class="cab"><div><h2>Avaliações</h2><p>Cadastre a prova, o gabarito e as turmas que vão fazê-la. Use pastas para separar por escola e por unidade.</p></div>
+    <div class="acoes"><button class="btn" data-acao="nova-pasta">Nova pasta</button><button class="btn pri" data-acao="nova-av">Nova avaliação</button></div></div>
+    ${avisoRegrasTimbrado()}
+    ${Object.keys(S.pastas).length || atual ? migalhas : ""}
+    ${pastas.length ? `<div class="lista lista-pastas">${pastas.map(cartaoPasta).join("")}</div>` : ""}
+    ${avs.length ? `<div class="lista">${avs.map(cartaoAv).join("")}</div>` : ""}
+    ${vazio}`;
+}
+function painelPasta(p) {
+  const nova = !p;
+  abrirPainel(`${cabPainel(nova ? "Nova pasta" : "Renomear pasta")}
+    <div class="painel-corpo">
+      ${nova && ui.pasta ? `<p class="muted" style="margin:0">Dentro de: <strong>${esc(nomeCaminho(ui.pasta))}</strong></p>` : ""}
+      <label class="campo"><span>Nome da pasta</span><input type="text" id="pastaNome" value="${esc(p ? p.nome : "")}" placeholder="Ex.: SESI Ibura, 1ª unidade"></label>
+    </div>
+    <div class="painel-rodape"><button class="btn" data-acao="fechar">Cancelar</button><button class="btn pri" data-acao="salvar-pasta">Salvar</button></div>`, { pasta: p || { id: novoId(), paiId: ui.pasta } });
+  setTimeout(() => $("#pastaNome") && $("#pastaNome").focus(), 50);
 }
 
 /* ---------- Folhas ---------- */
@@ -342,7 +394,14 @@ function avAtual() {
 }
 function seletorAv() {
   const avs = listaAvaliacoes();
-  return `<label class="campo" style="max-width:420px"><span>Avaliação</span><select id="selAv" data-muda="av">${avs.map((a) => `<option value="${a.id}" ${a.id === ui.avSel ? "selected" : ""}>${esc(a.titulo || "Sem título")}${a.componente ? " · " + esc(a.componente) : ""}</option>`).join("")}</select></label>`;
+  const opcao = (a) => `<option value="${a.id}" ${a.id === ui.avSel ? "selected" : ""}>${esc(a.titulo || "Sem título")}${a.componente ? " · " + esc(a.componente) : ""}</option>`;
+  // com pastas, as avaliações aparecem agrupadas pelo caminho da pasta
+  const grupos = [["", "Sem pasta"], ...arvorePastas().map((p) => [p.id, nomeCaminho(p.id)])]
+    .map(([id, nome]) => [nome, avs.filter((a) => pastaDaAv(a) === id)]).filter(([, l]) => l.length);
+  const html = grupos.length > 1 || (grupos[0] && grupos[0][0] !== "Sem pasta")
+    ? grupos.map(([nome, l]) => `<optgroup label="${esc(nome)}">${l.map(opcao).join("")}</optgroup>`).join("")
+    : avs.map(opcao).join("");
+  return `<label class="campo" style="max-width:420px"><span>Avaliação</span><select id="selAv" data-muda="av">${html}</select></label>`;
 }
 function telaFolhas() {
   const av = avAtual();
@@ -527,7 +586,7 @@ function timbradoDaAv(av) {
   const t = av && av.timbradoId && S.timbrados[av.timbradoId];
   return t ? { img: t.img, modo: t.modo || "pagina", nome: t.nome } : null;
 }
-const avisoRegrasTimbrado = () => (ui.timbradosBloqueados ? `<div class="aviso">Para guardar timbrados na nuvem, publique de novo as regras do Firebase (arquivo regras-firebase-gabarito.txt atualizado).</div>` : "");
+const avisoRegrasTimbrado = () => (ui.timbradosBloqueados ? `<div class="aviso">Para guardar timbrados e pastas na nuvem, publique de novo as regras do Firebase (arquivo regras-firebase-gabarito.txt atualizado).</div>` : "");
 function telaEscola() {
   const p = S.perfil, u = Nuvem.usuario;
   const ts = listaTimbrados();
@@ -745,7 +804,7 @@ async function confirmarImportacao() {
 /* --- Avaliação --- */
 function painelAvaliacao(av0) {
   const novo = !av0;
-  const av = av0 ? normAv({ ...av0 }) : { id: novoId(), titulo: "", componente: "", subtitulo: "ENSINO FUNDAMENTAL - ANOS FINAIS", turno: "", tipo: "nominal", versoes: 1, secoes: [{ nome: "", tipo: "4", n: 20, certo: 0.5, errado: 0 }], gabaritos: { A: "" }, anulaErrada: false, pontoPorQuestao: false, pontos: [], numChamada: false, turmas: [], transcricao: false, transcricaoTexto: "", instrucoes: "" };
+  const av = av0 ? normAv({ ...av0 }) : { id: novoId(), pastaId: ui.aba === "avaliacoes" ? pastaValida(ui.pasta) : "", titulo: "", componente: "", subtitulo: "ENSINO FUNDAMENTAL - ANOS FINAIS", turno: "", tipo: "nominal", versoes: 1, secoes: [{ nome: "", tipo: "4", n: 20, certo: 0.5, errado: 0 }], gabaritos: { A: "" }, anulaErrada: false, pontoPorQuestao: false, pontos: [], numChamada: false, turmas: [], transcricao: false, transcricaoTexto: "", instrucoes: "" };
   const ts = listaTurmas();
   // estado do editor: gabarito e pontos guardados por seção, para não embaralhar quando a quantidade muda
   const secs = av.secoes.map((s) => ({ nome: s.nome || "", tipo: String(s.tipo), n: +s.n, certo: +s.certo || 0, errado: +s.errado || 0 }));
@@ -757,6 +816,7 @@ function painelAvaliacao(av0) {
     <div class="painel-corpo">
       <div class="grade-campos">
         <label class="campo" style="grid-column:1/-1"><span>Título</span><input type="text" id="avTitulo" value="${esc(av.titulo)}" placeholder="Ex.: AVALIA II - 2026"></label>
+        <label class="campo" style="grid-column:1/-1"><span>Pasta</span><select id="avPasta"><option value="">Sem pasta (Avaliações)</option>${arvorePastas().map((p) => `<option value="${p.id}" ${pastaDaAv(av) === p.id ? "selected" : ""}>${"\u00a0\u00a0\u00a0".repeat(p.nivel)}${esc(p.nome)}</option>`).join("")}</select></label>
         <label class="campo"><span>Disciplina</span><input type="text" id="avComp" value="${esc(av.componente)}" placeholder="Ex.: Ciências"></label>
         ${campoOpcional("Professor(a)", "avProf", "semProfessor", av, `<input type="text" id="avProf" value="${esc(av.professor)}" placeholder="Nome que sai no cabeçalho" aria-label="Professor(a)">`)}
         ${campoOpcional("Turno", "avTurno", "semTurno", av, `<input type="text" id="avTurno" value="${esc(av.turno)}" placeholder="Ex.: Manhã" aria-label="Turno">`)}
@@ -966,7 +1026,7 @@ function salvarAvaliacao() {
   const pontos = ppq ? p.secs.flatMap((x, si) => p.pts[si].slice(0, x.n).map((v) => (v === "" || v == null ? null : +v))) : [];
   const dados = {
     ...av,
-    titulo: $("#avTitulo").value.trim(), componente: $("#avComp").value.trim(), professor: $("#avProf").value.trim(), turno: $("#avTurno").value.trim(),
+    pastaId: $("#avPasta").value, titulo: $("#avTitulo").value.trim(), componente: $("#avComp").value.trim(), professor: $("#avProf").value.trim(), turno: $("#avTurno").value.trim(),
     conteudo: $("#avConteudo").value.trim(), metodologia: $("#avMetodo").value.trim(),
     diaProva: $("#avDiaProva").value.trim(),
     ...Object.fromEntries([...document.querySelectorAll(".naFolha")].map((c) => [c.dataset.chave, c.dataset.chave.startsWith("com") ? c.checked : !c.checked])),
@@ -1410,6 +1470,25 @@ const acoes = {
   "excluir-turma": (el) => armar(el, () => { Nuvem.del("turmas", el.dataset.id); fecharPainel(); toast("Turma excluída."); }),
   "confirmar-importacao": confirmarImportacao,
   "nova-av": () => painelAvaliacao(null),
+  "nova-pasta": () => painelPasta(null),
+  "abrir-pasta": (el) => { ui.pasta = el.dataset.id || ""; render(); window.scrollTo(0, 0); },
+  "renomear-pasta": (el) => painelPasta(S.pastas[el.dataset.id]),
+  "salvar-pasta": () => {
+    const { pasta } = painelAtual, nome = $("#pastaNome").value.trim();
+    if (!nome) { toast("Dê um nome à pasta."); $("#pastaNome").focus(); return; }
+    Nuvem.put("pastas", pasta.id, { nome, paiId: pastaValida(pasta.paiId), criadoEm: pasta.criadoEm || agora() });
+    fecharPainel(); toast("Pasta salva.");
+  },
+  "excluir-pasta": (el) => armar(el, () => {
+    // o conteúdo não se perde: sobe para a pasta de cima
+    const p = S.pastas[el.dataset.id];
+    if (!p) return;
+    const pai = pastaValida(p.paiId);
+    for (const sp of Object.values(S.pastas)) if (sp.paiId === p.id) Nuvem.put("pastas", sp.id, { ...sp, paiId: pai });
+    for (const av of Object.values(S.avaliacoes)) if (av.pastaId === p.id) Nuvem.put("avaliacoes", av.id, { ...av, pastaId: pai });
+    Nuvem.del("pastas", p.id);
+    ui.pasta = pai; render(); toast("Pasta excluída. O que estava nela foi para a pasta de cima.");
+  }),
   "editar-av": (el) => painelAvaliacao(AV(el.dataset.id)),
   "salvar-av": salvarAvaliacao,
   "excluir-av": (el) => armar(el, () => { Nuvem.del("avaliacoes", el.dataset.id); fecharPainel(); toast("Avaliação excluída. As notas lidas continuam guardadas."); }),
