@@ -1,6 +1,7 @@
 /* Leitura da folha a partir de uma foto ou de um quadro da câmera.
    1) acha os 4 quadrados pretos, 2) calcula a perspectiva (homografia),
-   3) lê o QR code na posição esperada, 4) mede o preenchimento de cada bolinha. */
+   3) lê o QR code na posição esperada, 4) nas folhas novas, acerta a posição de cada coluna pelos
+   quadradinhos dela, 5) mede o preenchimento de cada bolinha. */
 
 class ErroLeitura extends Error {
   constructor(codigo, msg) { super(msg); this.codigo = codigo; }
@@ -99,12 +100,15 @@ function acharMarcas(g, w, h) {
     const ord = ordenarHorario(q);
     if (!convexo(ord)) continue;
     const aq = areaPoligono(ord);
-    if (aq < w * h * 0.05) continue;
+    if (aq < w * h * 0.03) continue;
     // lados opostos com tamanhos parecidos (folha retangular, perspectiva moderada)
     const L = [0, 1, 2, 3].map((i) => dist(ord[i], ord[(i + 1) % 4]));
     if (Math.min(L[0], L[2]) / Math.max(L[0], L[2]) < 0.6 || Math.min(L[1], L[3]) / Math.max(L[1], L[3]) < 0.6) continue;
-    // o tamanho dos quadrados tem de combinar com o tamanho da moldura que eles formam
-    const ladoEsperado2 = (aq / ((MARCAS.centros[1][0] - MARCAS.centros[0][0]) * (MARCAS.centros[2][1] - MARCAS.centros[1][1]))) * MARCAS.lado * MARCAS.lado;
+    // a moldura é mais larga que alta (a altura muda com o número de questões; a largura é sempre a mesma)
+    const largo = (L[0] + L[2]) / 2, alto = (L[1] + L[3]) / 2, comprido = Math.max(largo, alto), curto = Math.min(largo, alto);
+    if (curto / comprido < 0.15) continue;
+    // o tamanho dos quadrados tem de combinar com a largura da moldura que eles formam
+    const ladoEsperado2 = ((comprido / (MARCAS.centros[1][0] - MARCAS.centros[0][0])) * MARCAS.lado) ** 2;
     if (mn < ladoEsperado2 * 0.3 || mx > ladoEsperado2 * 3) continue;
     const score = aq * Math.sqrt(mn / mx);
     if (score > melhorScore) { melhorScore = score; melhor = ord; }
@@ -180,7 +184,7 @@ function amostrador(g, w, h, H) {
 
 /* Recorta a região do QR já "endireitada" e tenta decodificar */
 function lerQRRetificado(g, w, h, H) {
-  const s = 10, x0 = QR.x - 3, y0 = QR.y - 3, lado = QR.lado + 6, n = lado * s;
+  const s = 9, x0 = QR.x - 5, y0 = QR.y - 5, lado = QR.lado + 10, n = lado * s;
   const amostra = amostrador(g, w, h, H);
   const rgba = new Uint8ClampedArray(n * n * 4);
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
@@ -221,14 +225,80 @@ function preenchimento(amostra, cx, cy, r, branco, faixa) {
   return Math.min(1, max);
 }
 
+/* Referência de preto: interior dos quadrados dos cantos */
+function pretoDe(amostra, geo) {
+  return geo.marcas.map(([x, y]) => mediaDisco(amostra, x, y, 2.5)).sort((a, b) => a - b)[1];
+}
+
+/* Moldura (TL, TR, BR, BL em mm) com a altura dada, para ler o QR antes de saber o tamanho exato */
+const molduraComAltura = (alt) => { const [[x0, y0], [x1]] = MARCAS.centros; return [[x0, y0], [x1, y0], [x1, y0 + alt], [x0, y0 + alt]]; };
+/* Alturas prováveis da moldura (mm) vendo os 4 cantos na ordem TL, TR, BR, BL: pela proporção dos lados
+   (a perspectiva distorce um pouco, por isso vai também a altura da folha antiga como alternativa) */
+function alturasProvaveis(d) {
+  const larg = MARCAS.centros[1][0] - MARCAS.centros[0][0];
+  const alt = (larg * (dist(d[0], d[3]) + dist(d[1], d[2]))) / (dist(d[0], d[1]) + dist(d[3], d[2]));
+  if (alt < 25 || alt > 175) return [];
+  const antiga = MARCAS.centros[2][1] - MARCAS.centros[0][1];
+  return Math.abs(alt - antiga) < 6 ? [antiga, alt] : [alt, antiga];
+}
+
+/* Acha o centro (em mm) do quadradinho preto perto de (X, Y), procurando numa janela de ±6 mm na imagem
+   já endireitada pela homografia geral. Devolve null se não achar um quadrado do tamanho certo. */
+function acharMarcaLocal(amostra, X, Y, lado, preto) {
+  const s = 4, R = 6, n = 2 * R * s + 1, v = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) v[j * n + i] = amostra(X - R + i / s, Y - R + j / s);
+  const ord = Array.from(v).sort((a, b) => b - a), branco = ord[Math.floor(n * n * 0.2)];
+  if (branco - preto < 40) return null;
+  const lim = (branco + preto) / 2, esperado = (lado * s) ** 2;
+  // entre as manchas escuras do tamanho de um quadradinho (e bem "cheias"), a mais perto do ponto previsto
+  const vis = new Uint8Array(n * n);
+  let melhor = null, dMelhor = Infinity;
+  for (let ini = 0; ini < n * n; ini++) {
+    if (vis[ini] || v[ini] >= lim) continue;
+    const pilha = [ini];
+    vis[ini] = 1;
+    let area = 0, sx = 0, sy = 0, toca = false, i0 = n, i1 = 0, j0 = n, j1 = 0;
+    while (pilha.length) {
+      const p = pilha.pop(), i = p % n, j = (p - i) / n;
+      area++; sx += i; sy += j;
+      if (i < i0) i0 = i; if (i > i1) i1 = i; if (j < j0) j0 = j; if (j > j1) j1 = j;
+      if (i === 0 || j === 0 || i === n - 1 || j === n - 1) toca = true;
+      if (i > 0 && !vis[p - 1] && v[p - 1] < lim) { vis[p - 1] = 1; pilha.push(p - 1); }
+      if (i < n - 1 && !vis[p + 1] && v[p + 1] < lim) { vis[p + 1] = 1; pilha.push(p + 1); }
+      if (j > 0 && !vis[p - n] && v[p - n] < lim) { vis[p - n] = 1; pilha.push(p - n); }
+      if (j < n - 1 && !vis[p + n] && v[p + n] < lim) { vis[p + n] = 1; pilha.push(p + n); }
+    }
+    if (toca || area < esperado * 0.45 || area > esperado * 2) continue;
+    const bw = i1 - i0 + 1, bh = j1 - j0 + 1;
+    if (area / (bw * bh) < 0.6 || bw / bh < 0.6 || bw / bh > 1.67) continue;
+    const cx = sx / area, cy = sy / area, d = (cx - R * s) ** 2 + (cy - R * s) ** 2;
+    if (d < dMelhor) { dMelhor = d; melhor = [X - R + cx / s, Y - R + cy / s]; }
+  }
+  return melhor;
+}
+
+/* Homografias por coluna a partir dos quadradinhos de cada coluna (folhas novas).
+   Coluna em que algum quadradinho não foi achado fica com a homografia geral. */
+function homografiasDasColunas(g, w, h, H, geo) {
+  const out = [];
+  if (!geo.marcasCol || !geo.marcasCol.length) return out;
+  const amostra = amostrador(g, w, h, H), preto = pretoDe(amostra, geo);
+  for (const col of geo.marcasCol) {
+    const achados = col.pts.map(([X, Y]) => acharMarcaLocal(amostra, X, Y, MARCA_COL.lado, preto));
+    if (achados.some((p) => !p)) continue;
+    const Hc = homografia(col.pts, achados.map(([X, Y]) => { const [x, y] = H(X, Y); return { x, y }; }));
+    if (Hc) out[col.c] = Hc;
+  }
+  return out;
+}
+
 /* Lê as bolinhas. Devolve string de respostas: letra (A–E ou C/E), "-" (branco) ou "*" (mais de uma). */
-function lerBolinhas(amostra, geo) {
-  // referência de preto: interior dos quadrados dos cantos
-  const pretos = MARCAS.centros.map(([x, y]) => mediaDisco(amostra, x, y, 2.5));
-  const preto = pretos.sort((a, b) => a - b)[1];
+function lerBolinhas(amostraGeral, geo, amostrasCol) {
+  const preto = pretoDe(amostraGeral, geo);
   let resp = "";
   const fills = [];
   for (let q = 0; q < geo.nQ; q++) {
+    const amostra = (amostrasCol && amostrasCol[geo.colDe(q)]) || amostraGeral;
     const letras = geo.letras(q);
     // referência de branco: vãos entre as bolinhas da mesma linha
     const brancos = [];
@@ -246,6 +316,7 @@ function lerBolinhas(amostra, geo) {
     const d = decidir(f);
     resp += d === -1 ? "-" : d === -2 ? "*" : letras[d];
   }
+  const amostra = amostraGeral;
   // grade do Nº de chamada
   let numero = null;
   if (geo.num) {
@@ -295,13 +366,17 @@ function lerFolha(canvas) {
   const pts = marcas.map(paraCanvas);
 
   // tenta as 4 orientações; a certa é a que tem o QR code junto ao quadrado superior esquerdo
-  let codigo = null, H = null;
-  for (const k of [0, 1, 3, 2]) {
+  // a altura da moldura muda com o número de questões: primeiro uma estimativa (para achar o QR);
+  // depois de ler o QR, a altura exata sai do layout
+  let codigo = null, dstOk = null;
+  tentativas: for (const k of [0, 1, 3, 2]) {
     const dst = [0, 1, 2, 3].map((i) => pts[(i + k) % 4]);
-    const Hk = homografia(MARCAS.centros, dst);
-    if (!Hk) continue;
-    const txt = lerQRRetificado(g, w, h, Hk);
-    if (txt && lerCodigoQR(txt)) { codigo = txt; H = Hk; break; }
+    for (const alt of alturasProvaveis(dst)) {
+      const Hk = homografia(molduraComAltura(alt), dst);
+      if (!Hk) continue;
+      const txt = lerQRRetificado(g, w, h, Hk);
+      if (txt && lerCodigoQR(txt)) { codigo = txt; dstOk = dst; break tentativas; }
+    }
   }
   if (!codigo) {
     const r = jsQR(rgba, w, h, { inversionAttempts: "dontInvert" });
@@ -313,15 +388,18 @@ function lerFolha(canvas) {
       let j = 0, best = Infinity;
       pts.forEach((p, i) => { const d = dist(p, qc); if (d < best) { best = d; j = i; } });
       // o quadrado mais perto do QR é o superior esquerdo
-      H = homografia(MARCAS.centros, [0, 1, 2, 3].map((i) => pts[(i + j) % 4]));
+      dstOk = [0, 1, 2, 3].map((i) => pts[(i + j) % 4]);
     }
   }
   if (!codigo) throw erro("qr", "Achei os 4 quadrados, mas não consegui ler o QR code. Aproxime um pouco o celular e evite sombra ou reflexo.", pts);
   const info = lerCodigoQR(codigo);
   const geo = geometria(info.L);
-  const amostra = amostrador(g, w, h, H);
-  const { resp, fills, numero, lingua } = lerBolinhas(amostra, geo);
-  return { codigo, info, resp, fills, numero, lingua, H, geo, pts };
+  const H = homografia(geo.marcas, dstOk);
+  if (!H) throw erro("cantos", "Não consegui calcular a posição do gabarito. Tente de novo, de cima e com boa luz.", pts);
+  const Hcol = homografiasDasColunas(g, w, h, H, geo);
+  const amostrasCol = Hcol.map((Hc) => Hc && amostrador(g, w, h, Hc));
+  const { resp, fills, numero, lingua } = lerBolinhas(amostrador(g, w, h, H), geo, amostrasCol);
+  return { codigo, info, resp, fills, numero, lingua, H, Hcol, geo, pts };
 }
 
 /* Desenha uma prévia reduzida com as marcações reconhecidas */
@@ -336,7 +414,7 @@ function previaLeitura(canvas, leitura, gabarito, largura = 520) {
   ctx.lineWidth = 2 * esp;
   ctx.strokeStyle = "#2f6fed";
   ctx.beginPath();
-  MARCAS.centros.forEach(([X, Y], i) => { const [x, y] = H(X, Y); i ? ctx.lineTo(x * k, y * k) : ctx.moveTo(x * k, y * k); });
+  geo.marcas.forEach(([X, Y], i) => { const [x, y] = H(X, Y); i ? ctx.lineTo(x * k, y * k) : ctx.moveTo(x * k, y * k); });
   ctx.closePath(); ctx.stroke();
   for (let q = 0; q < geo.nQ; q++) {
     const r = resp[q];
@@ -348,8 +426,9 @@ function previaLeitura(canvas, leitura, gabarito, largura = 520) {
       const correta = gab === L;
       if (!marcada && !correta) continue;
       const [X, Y] = geo.pos(q, a);
-      const [x, y] = H(X, Y);
-      const [x2] = H(X + geo.r, Y);
+      const Hq = (leitura.Hcol && leitura.Hcol[geo.colDe(q)]) || H;
+      const [x, y] = Hq(X, Y);
+      const [x2] = Hq(X + geo.r, Y);
       const rad = Math.max(3 * esp, Math.abs(x2 - x) * k + 1.5 * esp);
       ctx.beginPath(); ctx.arc(x * k, y * k, rad, 0, Math.PI * 2);
       if (marcada) { ctx.strokeStyle = r === "*" || gab === "?" ? "#e08a00" : correta || !gab || gab === "X" ? "#16a34a" : "#dc2626"; ctx.lineWidth = 2.5 * esp; }
