@@ -20,7 +20,7 @@ window.GABARITO_FIREBASE = {
 };
 */
 
-/* Administrador: e-mail Google de quem aprova e remove o acesso dos professores (aba "Acessos").
-   Precisa ser o mesmo e-mail escrito nas regras do Firebase (firestore.rules).
+/* Administradores: e-mails Google de quem aprova e remove o acesso dos professores (aba "Acessos").
+   Precisam ser os mesmos e-mails escritos nas regras do Firebase (firestore.rules).
    Vazio = o site não pede aprovação. */
-window.GABARITO_ADMIN = ["andersonserafimcpv@gmail.com"];
+window.GABARITO_ADMIN = ["andersonserafimcpv@gmail.com", "matheusernandes09@gmail.com"];
