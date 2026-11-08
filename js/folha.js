@@ -28,19 +28,23 @@ function layoutDe(av) {
     num: av.tipo === "neutra" && !!av.numChamada,
     cols: [1, 2, 3].includes(+av.colunas) ? +av.colunas : 0,   // 0 = automático
     lingua: !!av.comLingua,
+    m: true,   // modelo com quadradinhos por coluna e moldura do tamanho da prova
   };
 }
-const layoutStr = (L) => L.secs.map((s) => s.t + "-" + s.n).join("_") + "~" + (L.trans ? "t" : "") + (L.num ? "n" : "") + (L.lingua ? "l" : "") + (L.cols ? L.cols : "");
+const layoutStr = (L) => L.secs.map((s) => s.t + "-" + s.n).join("_") + "~" + (L.trans ? "t" : "") + (L.num ? "n" : "") + (L.lingua ? "l" : "") + (L.m ? "m" : "") + (L.cols ? L.cols : "");
 function parseLayout(s) {
   const [a, f = ""] = String(s).split("~");
   const secs = a.split("_").map((x) => { const [t, n] = x.split("-"); return { t, n: +n }; });
   if (!secs.length || secs.some((x) => !/^[2-5C]$/.test(x.t) || !(x.n > 0))) return null;
   const c = /[1-3]/.exec(f);
-  return { secs, trans: f.includes("t"), num: f.includes("n"), lingua: f.includes("l"), cols: c ? +c[0] : 0 };
+  return { secs, trans: f.includes("t"), num: f.includes("n"), lingua: f.includes("l"), m: f.includes("m"), cols: c ? +c[0] : 0 };
 }
 
 /* Geometria das questões dentro da moldura (em mm na folha), a partir do layout */
 const GRADE = { top: 145, bottom: 258.5, x0: 21, x1: 189, pitchMin: 4.5, pxMin: 4.0 };
+/* Quadradinhos de cada coluna (modelo "m"): um em cada canto da coluna, logo acima da primeira linha e logo
+   abaixo da última. O leitor usa os 4 de cada coluna para acertar a posição das bolinhas daquela coluna. */
+const MARCA_COL = { lado: 4, folga: 2.5, alturaMin: 36 };
 function geometria(L) {
   const secs = L.secs, multi = secs.length > 1;
   const slots = [], qSec = [];
@@ -71,7 +75,19 @@ function geometria(L) {
   const slotDe = [];
   slots.forEach((s, k) => { if (s.q != null) slotDe[s.q] = k; });
   const xy = (k) => [x0 + Math.floor(k / rows) * colW, top + (k % rows) * pitch];
+  // modelo "m": quadradinhos nos cantos de cada coluna e quadrados de baixo logo depois da última linha
+  const yTopo = top - pitch / 2 - MARCA_COL.folga, yBase = top + (rows - 1) * pitch + pitch / 2 + MARCA_COL.folga;
+  const marcasCol = [];
+  if (L.m) for (let c = 0; c < cols; c++) {
+    if (Math.min(rows, slots.length - c * rows) <= 0) continue;
+    const xa = x0 + c * colW - 1.5 + MARCA_COL.lado / 2, xb = x0 + c * colW + colW - gapC + 1.5 - MARCA_COL.lado / 2;
+    marcasCol.push({ c, pts: [[xa, yTopo], [xb, yTopo], [xb, yBase], [xa, yBase]] });
+  }
+  const yM = MARCAS.centros[0][1], yB = L.m ? Math.max(yBase, yM + MARCA_COL.alturaMin) : MARCAS.centros[2][1];
+  const marcas = L.m ? [[15, yM], [195, yM], [195, yB], [15, yB]] : MARCAS.centros;
   return {
+    marcas, marcasCol,
+    colDe: (q) => Math.floor(slotDe[q] / rows),
     L, slots, nQ, qSec, top, cols, rows, pitch, px, r, colW, x0, lab, gapC,
     cabe: pitch >= GRADE.pitchMin - 1e-9 && px >= GRADE.pxMin - 1e-9,
     num: !!L.num,
@@ -299,10 +315,12 @@ function opsFolha(d) {
   if (valor) L({ t: "text", s: "Valor: " + valor.toLocaleString("pt-BR", { minimumFractionDigits: 1, maximumFractionDigits: 2 }), x: 183, y: yLinha + hLinha - 2, size: 6.5, color: "#777777", align: "center" });
 
   // Moldura do gabarito: fundo branco (cobre o timbrado), borda leve e os 4 quadrados
-  const [[mx0, my0], , [mx1, my1]] = MARCAS.centros, ml = MARCAS.lado / 2;
+  const [[mx0, my0], , [mx1, my1]] = g.marcas, ml = MARCAS.lado / 2;
   L({ t: "rect", x: mx0 - ml - 1, y: my0 - ml - 1, w: mx1 - mx0 + 2 * ml + 2, h: my1 - my0 + 2 * ml + 2, fill: "#ffffff" });
   L({ t: "rrect", x: mx0 - ml, y: my0 - ml, w: mx1 - mx0 + 2 * ml, h: my1 - my0 + 2 * ml, stroke: "#c8c8c8", lw: 0.3, rx: 1.5 });
-  for (const [x, y] of MARCAS.centros) L({ t: "rect", x: x - ml, y: y - ml, w: MARCAS.lado, h: MARCAS.lado, fill: "#000000" });
+  for (const [x, y] of g.marcas) L({ t: "rect", x: x - ml, y: y - ml, w: MARCAS.lado, h: MARCAS.lado, fill: "#000000" });
+  const mc = MARCA_COL.lado;
+  for (const col of g.marcasCol) for (const [x, y] of col.pts) L({ t: "rect", x: x - mc / 2, y: y - mc / 2, w: mc, h: mc, fill: "#000000" });
 
   // Faixa superior da moldura: QR code, código de barras ou grade do Nº de chamada, e lembrete
   L({ t: "qr", s: codigoQR(av, turma && turma.id, aluno && aluno.id, ver), x: QR.x, y: QR.y, size: QR.lado });
